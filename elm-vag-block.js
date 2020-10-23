@@ -1,17 +1,19 @@
 var noble = require('@abandonware/noble');
-const fs = require('fs');
 
+//catch ctrl-c so we can disconect from bluetoth
 process.on('SIGINT', function() {
 	process.exit();
 });
 
+//Execute commands throgh stdin for DEBUG Reasons
 process.stdin.on('data', function(data) {
 	var cmd = data.toString();
-	cmd = cmd.substr(0, cmd.length-1);
+	cmd = cmd.substr(0, cmd.length-1);//Cut out the \n
 	console.error('add cmd', cmd, 'que', command_que, 'wating_for_response', wating_for_response);
-        execute_command(cmd);
+	execute_command(cmd);
 });
 
+//The bluetoth library has many Listeners active
 process.setMaxListeners(265);
 
 //var DEBUG = false;
@@ -20,21 +22,28 @@ var Service = [
  'fff0'//carista
 ];
 
-var command_que = [];
-var wating_for_response = false;
-var reciving_response = '';
-var last_command = {cmd:'', callback:null};
 
-var ELM_answer_timeout = 5000;//5 seconds
+var command_que = [];//que for commands that should be executed
+var wating_for_response = false;//Are we wating for a command to be responded to
+var reciving_response = '';//Where we store the response untill the ELM327 is done
+var last_command = {cmd:'', callback:null};//Last executed command, used to execute callback when done
+
+var ELM_answer_timeout = 5000;//after 5 seconds we asume the ELM will never answer
 function ELM327_not_answering_in_time(){
-	console.error("ELM327 not answering in time it might be excpecting more input. Reseting the line.")
+	console.error("ELM327 not answering in time it might be excpecting more input. Reseting the line. Restart program!")
 	send_data_to_car(Buffer.from("\r", 'utf8'))
 	wating_for_response = false;
+	command_que = [];
 }
+
+//sends a string to the ELM327
 function send_command(cmd){
 	wating_for_response = setTimeout(ELM327_not_answering_in_time, ELM_answer_timeout);
 	send_data_to_car(Buffer.from(cmd+"\r", 'utf8'))
 }
+
+//sends a command from que to the ELM327 If it is not busy and we acctule have
+//one in the que
 function try_send_command_from_que(){
 	if(!wating_for_response && command_que.length != 0){
 		last_command = command_que.shift();
@@ -42,6 +51,8 @@ function try_send_command_from_que(){
 	}
 }
 
+//Adds a command and a callback to the execution que the callback will be
+//called when the command has recived a responce
 function execute_command(cmd, callback){
 	if(typeof(callback) == 'undefined'){
 		callback = null;
@@ -49,14 +60,16 @@ function execute_command(cmd, callback){
 	command_que.push({cmd:cmd, callback:callback});
 	try_send_command_from_que();
 }
+
 /*
+
+TP 2.0 is Volksvagens propritary protocol for sending long messages over canbus this implementation is based on varius sources on the internet and github
 https://i-wiki.ru/?post=vw-transport-protocol-20-tp-20-for-can-bus
 The channel setup type has a fixed length of 7 bytes. It is used to establish a data channel between two modules.
 The channel setup request message should be sent from CAN ID 0x200 and the response will sent with CAN ID 0x200 + the destination modules logical address e.g. for the engine control unit (0x01) the response would be 0x201.
 The communication then switches to using the CAN IDs which were negotiated during channel setup.
 You should request the destination module to transmit using CAN ID 0x300 to 0x310 and set the validity nibble for RX ID to invalid. The VW modules seem to respond that you should transmit using CAN ID 0x740.
 */
-
 var TP20_opcodes = {
 	Setup_request:'C0',
 	Positive_response: 'D0',
@@ -70,7 +83,6 @@ var TP20_opcodes = {
 	Channel_test : 'A3',//response is same as parameters response. Used to keep channel alive. (1 byte)
 	Break: 'A4',//receiver discards all data since last ACK (1 byte)
 	Disconnect: 'A8',// channel is no longer open. Receiver should reply with a disconnect (1 byte)
-
 	Waiting_for_ACK_more_packets_to_follow: '00',//more packets to follow (i.e. reached max block size value as specified above)
 	Waiting_for_ACK_this_is_last_packet: '01',
 	Not_waiting_for_ACK_more_packets_to_follow: '02',
@@ -79,21 +91,14 @@ var TP20_opcodes = {
 	ACK_not_ready_for_next_packet: '09'
 	
 };
-function op_is_data(op){
-	if(op == TP20_opcodes.Waiting_for_ACK_more_packets_to_follow 
-		|| op == TP20_opcodes.Waiting_for_ACK_this_is_last_packet
-		|| op == TP20_opcodes.Not_waiting_for_ACK_more_packets_to_follow
-		|| op == TP20_opcodes.Not_waiting_for_ACK_this_is_last_packet
-		){
-		return true
-	}
-	return false
-}
 
+//in data packages the first byte is bothe the opcode and the packet sequence
+//number 4 bits each separate the two
 function TP20_opcode_separation(byte){
 	return({op:'0'+byte.substr(0,1),seq:parseInt(byte.substr(1,1), 16)})
 }
 
+//Makes a 2 byte hex code from a number
 function hexstr(nr){
 	st = nr.toString(16).toUpperCase()
 	if(nr<16){
@@ -101,19 +106,24 @@ function hexstr(nr){
 	}
 	return st;
 }
+
+//Takes ELM 327 CAN response data and makes it in to an array
 function TP20_line_cleanup(lines){
 	TP20Data = [];
 	for(x in lines){
 		bytes = lines[x].split(' ');
-		from_address = bytes.shift()
-		nr_bytes = bytes.shift()
-		if(bytes[bytes.length-1] == ''){
+		from_address = bytes.shift()//first byte is the source address(added by ELM327)
+		nr_bytes = bytes.shift()//How many bytes did we get(added by ELM327)
+		if(bytes[bytes.length-1] == ''){//The elm adds an extra space at the end of each line remove it
 			bytes.pop();
 		}
 		TP20Data.push(bytes)
 	}
 	return TP20Data;
 }
+
+//Based on the last recived sequence what is the next seqence that we should
+//get from the ECU used to send ACK's t ECU
 function expected_seq(cur_seq){
 	str = (cur_seq+1).toString(16).toUpperCase();
 	if(str.length > 1){
@@ -121,6 +131,9 @@ function expected_seq(cur_seq){
 	}
 	return str;
 }
+
+//Interpret and deal with data comming in on the TP 2.0 data channel Answer
+//with ACK's when needed
 function interpret_TP20_incoming(lines, when_done, previus_data){
 	if(typeof(previus_data) == 'undefined'){
 		previus_data = [];
@@ -156,8 +169,11 @@ function interpret_TP20_incoming(lines, when_done, previus_data){
 	}
 
 }
-TP_send_seq = 0;
 
+TP_send_seq = 0;
+//Send TP 2.0 data since this program never sends more than a few bytes we have
+//not implmented longer TP 2.0 messages that would require more than one canbus
+//message
 function SendTPData(data, callback){
 	execute_command("1"+TP_send_seq.toString(16).toUpperCase()+" 00 "+hexstr(data.length)+" "+data.join(" "), function(lines){
 		
@@ -169,11 +185,14 @@ function SendTPData(data, callback){
 		
 	});
 	TP_send_seq++;
-	if(TP_send_seq>16){
+	if(TP_send_seq>15){
 		TP_send_seq = 0;
 	}
 }
 
+
+//Requests data block from ECU A data block is a block of max 4 data values
+//that has data about some messurment from the ECU
 function request_block(block, callback){
 	SendTPData(['21', block], function(data){
 		console.error("block data", data)
@@ -191,6 +210,7 @@ function request_block(block, callback){
 			a = parseInt(b1, 16);
 			b = parseInt(b2, 16);
 			
+			//based on https://www.blafusel.de/obd/obd2_kw1281.html
 			str = ''
 			switch(data_type){
 				case 1://Engine speed
@@ -263,6 +283,7 @@ function request_block(block, callback){
 	});
 }
 
+//initiates diagnostics mode in the ECU
 function request_diag(){
 	//initiate diagnostics
 	SendTPData(['10', '89'], function(data){
@@ -280,6 +301,9 @@ function request_diag(){
 		});
 	});
 }
+
+
+//Sets up a TP 2.0 DATA chanel to a specifed ECU
 function setup_TP20_channel(dest){
 
 	//Set Header (OBD, and CAN)(sent from address)
@@ -299,6 +323,7 @@ function setup_TP20_channel(dest){
 			//set CAN Send from to the senders request negotiated address
 			execute_command("AT SH "+VirtualCanAddress);
 			
+			//We want to listen to CAN address 300
 			execute_command("AT CRA 300");
 			
 			//Send own channel parameters, request others
@@ -316,6 +341,7 @@ function setup_TP20_channel(dest){
 	});
 }
 
+//When the conenction to the ELM 327 is astablished this function is executed
 function ELM_conection_established(){
 	execute_command("AT Z");//request elm327 reset
 	execute_command("AT E0");//request No echo
@@ -343,9 +369,9 @@ function ELM_conection_established(){
 var Writer = null;
 
 
+//Executed whenever we get data from the ELM327 "\r>" is interpreted as if the resonse is done and next command can be executed
 function on_data_from_car(data, isNotification){
 	reciving_response = reciving_response + data.toString();
-	//console.error("data:", data);
 	if(reciving_response.substr(reciving_response.length-2) == "\r>"){
 		//respose done
 		resp = reciving_response.substr(0, reciving_response.length-2);
@@ -368,19 +394,14 @@ function on_data_from_car(data, isNotification){
 		
 		try_send_command_from_que();
 	}
-	//process.stdout.write(data);
-	//fs.appendFileSync('dump.dmp', Buffer.concat([Buffer.from("car:"), data, Buffer.from("\n")]));
-
-	//DEBUG
-	//console.error(data.toString());
-	//console.log('from car:', data.toString(), isNotification)
 }
+
+//Sends data to the ELM327
 function send_data_to_car(data){
-	//console.error(data.toString());
-	fs.appendFileSync('dump.dmp', Buffer.concat([Buffer.from("app:"), data, Buffer.from("\n")]));
 	Writer.write(data, true, error_function);
 }
 
+//Executed when a low energy bluetoth device is found
 noble.on('discover', function(peripheral) {
 	//DEBUG
 	console.error('found peripheral');
@@ -420,12 +441,12 @@ noble.on('discover', function(peripheral) {
 })
 
 
+//Start scaning for Low energy bluetoth devices
 noble.startScanning(Service, false, error_function);
 
-
+//When we get a bluetoth error 
 function error_function(error){
 	if(error){
-	  console.error('scan error:', error)
+		console.error('scan error:', error)
 	}
 }
-
