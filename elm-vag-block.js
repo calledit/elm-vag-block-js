@@ -1,5 +1,8 @@
 var noble = require('@abandonware/noble');
 
+const args = process.argv.slice(2)
+var ECU_module = parseInt(args[0]);
+
 //catch ctrl-c so we can disconect from bluetoth
 process.on('SIGINT', function() {
 	process.exit();
@@ -143,20 +146,53 @@ function interpret_TP20_incoming(lines, when_done, previus_data){
 	for(x in TP20response){
 		opcode_byte = TP20response[x].shift();
 		opcode_dat = TP20_opcode_separation(opcode_byte)
+		isData_packet = true;
+		if(opcode_dat.op == '0A'){
+			isData_packet = false;
+			console.error("ECU is sending a A command a meta command", opcode_dat);
+			if(opcode_byte == TP20_opcodes.Disconnect){
+				console.error("ECU wants to disconnect");
+				SendTP(TP20_opcodes.Disconnect, function(moredata){
+					console.error("sent ack for disconect", moredata)
+				});
+			}
+			if(opcode_byte == TP20_opcodes.Break){
+				console.error("ECU wants us to send data again");
+			}
+			if(opcode_byte == TP20_opcodes.Channel_test){
+				console.error("ECU wants us to Channel_test");
+				SendTP(TP20_opcodes.Channel_test, function(moredata){
+					console.error("sent Channel_test ACK the ECU will send parametrs response back", moredata)
+				});
+			}
+			if(opcode_byte == TP20_opcodes.Parameters_respsonse){
+					console.error("Recived TP2.0 parmeters", TP20response[x])
+			}
+		}
+		if(opcode_dat.op == '0B'){
+			isData_packet = false;
+			console.error("ECU is sending a B command a ACK saying how much it has recived", opcode_dat);
+		}
 		
-		previus_data = previus_data.concat(TP20response[x]);
-		if(opcode_dat.op == TP20_opcodes.Waiting_for_ACK_this_is_last_packet){
-			execute_command("B"+expected_seq(opcode_dat.seq));
-			WeHaveTheMassage = true;
-		}
-		if(opcode_dat.op == TP20_opcodes.Not_waiting_for_ACK_this_is_last_packet){
-			WeHaveTheMassage = true;
-		}
-		if(opcode_dat.op == TP20_opcodes.Waiting_for_ACK_more_packets_to_follow){
-			//request more data by sending ACK
-			execute_command("B"+expected_seq(opcode_dat.seq), function(moredata){
-				interpret_TP20_incoming(moredata, when_done, previus_data);
-			});
+		if(isData_packet){
+			previus_data = previus_data.concat(TP20response[x]);
+			if(opcode_dat.op == TP20_opcodes.Waiting_for_ACK_this_is_last_packet){
+				//This should never return any data but but sometimes it does
+				//due to elm327 issues (i think)
+				execute_command("B"+expected_seq(opcode_dat.seq));
+
+				//SendTP("B"+expected_seq(opcode_dat.seq), function(dat){console.error("response to final B", dat)});
+				WeHaveTheMassage = true;
+			}
+			if(opcode_dat.op == TP20_opcodes.Not_waiting_for_ACK_this_is_last_packet){
+				WeHaveTheMassage = true;
+			}
+			if(opcode_dat.op == TP20_opcodes.Waiting_for_ACK_more_packets_to_follow){
+				//request more data by sending ACK
+				execute_command("B"+expected_seq(opcode_dat.seq), function(moredata){
+					interpret_TP20_incoming(moredata, when_done, previus_data);
+				});
+			}
 		}
 	}
 	if(WeHaveTheMassage){
@@ -169,23 +205,38 @@ function interpret_TP20_incoming(lines, when_done, previus_data){
 	}
 
 }
+function is_TP20(lines){
+	for(x in lines){
+		if(lines[x] == 'NO DATA'){
+			return false;
+		}
+	}
+	return true;
+}
+
+//Sends a TP command and calls the callback with the response
+function SendTP(cmd_str, callback){
+	execute_command(cmd_str, function(lines){
+		if(!is_TP20(lines)){
+			callback([]);
+			return;
+		}
+		interpret_TP20_incoming(lines, function(fullmesage){
+			callback(fullmesage)
+		});
+		
+	});
+}
 
 TP_send_seq = 0;
 //Send TP 2.0 data since this program never sends more than a few bytes we have
 //not implmented longer TP 2.0 messages that would require more than one canbus
 //message
 function SendTPData(data, callback){
-	execute_command("1"+TP_send_seq.toString(16).toUpperCase()+" 00 "+hexstr(data.length)+" "+data.join(" "), function(lines){
-		
-		//Remove the ACK of our sent message
-		ACK = lines.shift();
-		interpret_TP20_incoming(lines, function(fullmesage){
-			callback(fullmesage)
-		});
-		
-	});
+	SendTP("1"+TP_send_seq.toString(16).toUpperCase()+" 00 "+hexstr(data.length)+" "+data.join(" "), callback);
 	TP_send_seq++;
 	if(TP_send_seq>15){
+		console.error("We should have requested an ACK")
 		TP_send_seq = 0;
 	}
 }
@@ -195,88 +246,97 @@ function SendTPData(data, callback){
 //that has data about some messurment from the ECU
 function request_block(block, callback){
 	SendTPData(['21', block], function(data){
-		console.error("block data", data)
+		//console.error("block data", data)
+		var values = []
 
 		response_code = data.shift();//61 means block data, 7F is called negative by other librarys, there are other codes
+		if(response_code != '7F'){
 
-		block_id = data.shift()
-		
-		var values = []
-		while(data.length != 0){
-			data_type = parseInt(data.shift(), 16)
-			b1 = data.shift()
-			b2 = data.shift()
+			block_id = data.shift()
 			
-			a = parseInt(b1, 16);
-			b = parseInt(b2, 16);
-			
-			//based on https://www.blafusel.de/obd/obd2_kw1281.html
-			str = ''
-			switch(data_type){
-				case 1://Engine speed
-					str = a*b*0.2+" (RPM)";
-					break;
-				case 5:
-					str = (a * (b-100) * 0.1)+" (° C)";
-					break;
-				case 6://Supply voltage ECU
-					str = a*b*0.001+" (V)";
-					break;
-				case 7://Vehicle speed
-					str = a*b*0.01+" (km/h)";
-					break;
-				case 18:
-					str = (0.04 * a * b)+" (mbar)";
-					break;
-				case 14:
-					str = (0.005 * a * b)+" (bar)";
-					break;
-				case 21://Module. Piston, Movement Sender (???) Voltage
-					str = 0.001 * a * b+" (V)";
-					break;
-				case 25:
-					str = ((b * 1.421) + (a / 182))+" (g / s)";
-					break;
-				case 16:
-					str = b1+' '+b2+' (bitvalue)';
-					break;
-				case 18:
-					str = (a * b)+" (C.)";
-					break;
-				case 20:
-					str = (a * (b-128) / 128)+' (%)';
-					break;
-				case 22:
-					str = (0.001 * a * b)+" (ms)";
-					break;
-				case 31:
-					str = (b / 2560 * a)+" (° C)";
-					break;
-				case 33:
-					if(a == 0){
-						str = 100 * b
-					}else{
-						str = 100 * b / a
-					}
-					str += " (%)";
-					break;
-				case 37:
-					str = a+" "+b+" (Oil Pr. 2 <min)";
-					break;
-				case 47:
-					str = ((b-128) * a)+" (ms)";
-					break;
-				case 48:
-					str = (b + a * 255)+" (Count)";
-					break;
-				case 54:
-					str = (a*256+b)+" (Count)";
-					break;
-				default:
-					str = b1+' '+b2+' ('+data_type+')';
-					break;
+			while(data.length != 0){
+				data_type = parseInt(data.shift(), 16)
+				b1 = data.shift()
+				b2 = data.shift()
+				
+				a = parseInt(b1, 16);
+				b = parseInt(b2, 16);
+				
+				//based on https://www.blafusel.de/obd/obd2_kw1281.html
+				//The calculations are often wrong, but some seam accurate.
+				str = ''
+				switch(data_type){
+					case 1://Engine speed
+						str = a*b*0.2+" (RPM)";
+						break;
+					case 5:
+						str = (a * (b-100) * 0.1)+" (° C)";
+						break;
+					case 6://Supply voltage ECU
+						str = a*b*0.001+" (V)";
+						break;
+					case 7://Vehicle speed
+						str = a*b*0.01+" (km/h)";
+						break;
+					case 18:
+						str = (0.04 * a * b)+" (mbar)";
+						break;
+					case 14:
+						str = (0.005 * a * b)+" (bar)";
+						break;
+					case 21://Module. Piston, Movement Sender (???) Voltage
+						str = 0.001 * a * b+" (V)";
+						break;
+					case 25:
+						str = ((b * 1.421) + (a / 182))+" (g / s)";
+						break;
+					case 16:
+						str = b1+' '+b2+' (bitvalue)';
+						break;
+					case 18:
+						str = (0.04 * a * b)+" (mbar)";
+						break;
+					case 20:
+						str = (a * (b-128) / 128)+' (%)';
+						break;
+					case 22:
+						str = (0.001 * a * b)+" (ms)";
+						break;
+					case 26:
+						str = (b)+" (C.)";
+						break;
+					case 31:
+						str = (b / 2560 * a)+" (° C)";
+						break;
+					case 33:
+						if(a == 0){
+							str = 100 * b
+						}else{
+							str = 100 * b / a
+						}
+						str += " (%)";
+						break;
+					case 37:
+						str = a+" "+b+" (Oil Pr. 2 <min)";
+						break;
+					case 47:
+						str = ((b-128) * a)+" (ms)";
+						break;
+					case 48:
+						str = (b + a * 255)+" (Count)";
+						break;
+					case 54:
+						str = (a*256+b)+" (Count)";
+						break;
+					default:
+						str = b1+' '+b2+' ('+data_type+')';
+						break;
+				}
+
+				//We add the raw values to the end, incase the calculation is wrong
+				str += "["+a+" "+b+"]";
+				values.push(str);
 			}
-			values.push(str);
 		}
 
 		callback(values);
@@ -284,27 +344,17 @@ function request_block(block, callback){
 }
 
 //initiates diagnostics mode in the ECU
-function request_diag(){
+function request_diag(callback){
 	//initiate diagnostics
 	SendTPData(['10', '89'], function(data){
 		console.error("TP 2.0 protocol Diag recived", data);
-		
-		console.error("Requesting block 02");
-		request_block('01', function(dat){
-			console.error("Got data from block 01", dat);
-			request_block('02', function(dat){
-				console.error("Got data from block 02", dat);
-				request_block('03', function(dat){
-					console.error("Got data from block 03", dat);
-				});
-			});
-		});
+		callback();
 	});
 }
 
 
 //Sets up a TP 2.0 DATA chanel to a specifed ECU
-function setup_TP20_channel(dest){
+function setup_TP20_channel(dest, callback){
 
 	//Set Header (OBD, and CAN)(sent from address)
 	execute_command("AT SH 200");
@@ -331,7 +381,7 @@ function setup_TP20_channel(dest){
 				TP20response = TP20_line_cleanup(lines);
 				console.error("TP 2.0 protocol channel parameters recived", TP20response)
 				
-				request_diag()
+				callback()
 				
 			});
 			
@@ -353,18 +403,42 @@ function ELM_conection_established(){
 	execute_command("AT PB C0 01");//set user mode B to  500kbps, 11 bit ID (set Protocol B options and baud rate)
 	execute_command("AT SP B");//Set Protocol to B and save it (6-C is can bus) So now we are in canbus mode
 	execute_command("AT H1");//Headers On
+	execute_command("AT ST 19");//Set Timeout to hh x 4 msec
 	execute_command("AT D1", function(){
 		console.error("initiation done");
 		process.stdin.resume();
 		
-		execute_command("AT ST 19");//Set Timeout to hh x 4 msec
 
 		//setup_TP20_channel(0x1f);//Diagnostic Interface 31
 		//setup_TP20_channel(0x01);//engine
-		setup_TP20_channel(10);//awd
+		//setup_TP20_channel(10);//awd
+		setup_TP20_channel(ECU_module, function(){
+			request_diag(function(){
+				request_blocks();
+			});
+		});
 		
 	});//display of the DLC On (CAN) Show length of message
 }
+
+var messuring_blocks = ['01', '02', '03', '04'];
+var block_ar_id = 0;
+
+//request messuring blocks over and over again
+function request_blocks(){
+	console.error("Requesting block ", messuring_blocks[block_ar_id]);
+	request_block(messuring_blocks[block_ar_id], function(dat){
+		console.error("Got data from block ", messuring_blocks[block_ar_id], dat);
+		block_ar_id++;
+		if(typeof(messuring_blocks[block_ar_id]) == 'undefined'){
+			block_ar_id = 0;
+		}
+		request_blocks();
+	});
+
+
+}
+
 
 var Writer = null;
 
@@ -382,7 +456,7 @@ function on_data_from_car(data, isNotification){
 				response_lines.push(response_lines_raw[x])
 			}
 		}
-		console.error("respose("+last_command.cmd+"):\n", response_lines);
+		//console.error("respose("+last_command.cmd+"):\n", response_lines);
 		reciving_response = "";
 		if(wating_for_response){
 			clearTimeout(wating_for_response);
