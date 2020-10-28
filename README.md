@@ -10,18 +10,20 @@ To read car data from the browser using a Bluetoth low energy adapter and the We
 * Parsing of ECU identification data
 
 ## Usage
-Run
+
 ``` bash
 node elm-vag-block.js ${address_of_ECU}
 ```
 
-it will try to connect to your carista ELM327 low energy Bluetooth adapter and read out the code blocks
-Connect to the diagnostics ECU on address 31 to get a list of all the other ECU's
+Will try to connect to your carista ELM327 low energy Bluetooth adapter and read out the DTC faults, show some data from the messuring blocks.
+To get a list of all the ECU's in the car: connect to the diagnostics ECU on address 31. Or you can try to reach the engine ECU, it is always on address 1.
 ``` bash
 node elm-vag-block.js 31
 ```
 
 ## Install
+``` bash
 npm install @abandonware/noble
+```
 
-It can be a pain to get building make sure you get latest xcode OSX and it should work.
+@abandonware/noble can be hard to get building, make sure you get latest xcode for OSX and it should work.
