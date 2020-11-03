@@ -1,6 +1,30 @@
+/*
+ * Theory of operation
+ * 1. Find and connect to ELM327 adapter
+ * 2. Inititate the ELM327
+ * 3. Connect to the cars CANBUS to request data or issue commands
+ * 
+ * Problems
+ * The CANBUS only support messages 8 bytes long but diagnosis requires longer
+ * messages.
+ * To solve this VW created a protocol called TP2.0 (think of if like a poor
+ * mans TCP.) TP2.0 has been reverse enginerd and we use that reverse
+ * enginering work here. On the TP2.0 line we then use the protocol KWP2000.
+ *
+ * CANBUS is asycronous in nature but the ELM327 protocol is not. This means we
+ * need to talk constantly to recive data when the ECU's are sending data. If
+ * the ELM327 is not waiting for an answer it wont pass it throgh. This causes
+ * some issues but aslong as the program keeps sending requests. The
+ * communication is fairly stable. If it craches just set it up again.
+ *
+ * While CANBUS is asycronous the ELM is not and neither are the protocols we
+ * use to talk to the ECU's. So we keep two request ques in this program, one for
+ * ELM327 commands and one for KWP2000 commands.
+ *
+ * */
 var noble = require('@abandonware/noble');
 
-var DEBUG=true
+var DEBUG=0
 
 const args = process.argv.slice(2)
 var ECU_module = parseInt(args[0]);
@@ -15,14 +39,14 @@ process.on('SIGINT', function() {
 process.stdin.on('data', function(data) {
 	var cmd = data.toString();
 	cmd = cmd.substr(0, cmd.length-1);//Cut out the \n
-	console.error('add cmd', cmd, 'que', command_que, 'wating_for_response', wating_for_response);
+	if(DEBUG >= 1){
+		console.error('add cmd', cmd, 'que', command_que, 'wating_for_response', wating_for_response);
+	}
 	execute_command(cmd);
 });
 
 //The bluetoth library has many Listeners active
 process.setMaxListeners(265);
-
-//var DEBUG = false;
 
 var Service = [
  'fff0'//carista
@@ -49,7 +73,7 @@ function ELM327_not_answering_in_time(){
 
 //sends a string to the ELM327
 function send_command(cmd){
-	if(DEBUG){
+	if(DEBUG>=5){
 		console.error("cmd: ", cmd)
 	}
 	wating_for_response = setTimeout(ELM327_not_answering_in_time, ELM_answer_timeout);
@@ -136,17 +160,6 @@ function TP20_line_cleanup(lines){
 	return TP20Data;
 }
 
-//Based on the last recived sequence what is the next seqence that we should
-//get from the ECU used to send ACK's t ECU
-function expected_seq(cur_seq){
-	str = (cur_seq).toString(16).toUpperCase();
-	if(str.length > 1){
-		return '0';
-	}
-	return str;
-}
-
-
 var next_TP20_seq = 0;
 //Interpret and deal with data comming in on the TP 2.0 data channel Answer
 //with ACK's when needed
@@ -175,7 +188,9 @@ function interpret_TP20_incoming(lines, when_done, previus_data, ChunkMode){
 			isData_packet = true;
 			if(opcode_dat.op == '0A'){
 				isData_packet = false;
-				console.error("ECU is sending a A command a meta command", opcode_dat);
+				if(DEBUG >= 3){
+					console.error("ECU is sending a A command a meta command", opcode_dat);
+				}
 				if(opcode_byte == TP20_opcodes.Disconnect){
 					wantsToDisconect = true;
 									}
@@ -186,12 +201,13 @@ function interpret_TP20_incoming(lines, when_done, previus_data, ChunkMode){
 					wantsToTestChannel = true;
 				}
 				if(opcode_byte == TP20_opcodes.Parameters_respsonse){
-						console.error("Recived TP2.0 parmeters", TP20response[x])
+						if(DEBUG >= 3){
+							console.error("Recived TP2.0 parmeters", TP20response[x])
+						}
 				}
 			}
 			if(opcode_dat.op == '0B'){
 				isData_packet = false;
-				//console.error("ECU is sending a B command a ACK saying how much it has recived", opcode_dat);
 			}
 			
 			if(isData_packet){
@@ -204,7 +220,9 @@ function interpret_TP20_incoming(lines, when_done, previus_data, ChunkMode){
 					
 					if(opcode_dat.op == TP20_opcodes.Waiting_for_ACK_this_is_last_packet){
 						if(first_packet && TP20response[x][2] == '7F' && TP20response[x][4] == '78'){
-							console.error("in 7F 78 mode")
+							if(DEBUG >= 2){
+								console.error("in 7F 78 mode")
+							}
 							//the sender does not know how long the packet is and will
 							//send it in chunks
 							ChunkMode = true;
@@ -223,7 +241,9 @@ function interpret_TP20_incoming(lines, when_done, previus_data, ChunkMode){
 					}
 					
 				}else{//if the sequence dont match this is probaly just copies of old messages
-					console.error("data packet has already been seen before")
+					if(DEBUG >= 3){
+						console.error("data packet has already been seen before")
+					}
 					wantsToTestChannel = false;
 					send_recipt_ACK = false;
 					wantsToDisconect = false;
@@ -231,26 +251,38 @@ function interpret_TP20_incoming(lines, when_done, previus_data, ChunkMode){
 			}
 		}
 		if(wantsToDisconect){
-			console.error("ECU wants to disconnect");
+			if(DEBUG >= 2){
+				console.error("ECU wants to disconnect");
+			}
 			SendTP(TP20_opcodes.Disconnect, function(moredata){
-				console.error("sent ack for disconect", moredata)
+				if(DEBUG >= 2){
+					console.error("sent ack for disconect", moredata)
+				}
 			});
 		}else{
 			if(wantsToTestChannel){
-				console.error("ECU wants us to Channel_test");
+				if(DEBUG >= 2){
+					console.error("ECU wants us to Channel_test");
+				}
 				SendTP(TP20_opcodes.Parameters_respsonse+" 0F 8A FF 4A FF", function(moredata){
-					console.error("sent Channel_test ACK the ECU will send parametrs response back", moredata)
+					if(DEBUG >= 2){
+						console.error("sent Channel_test ACK the ECU will send parametrs response back", moredata)
+					}
 				});
 			}
 			if(send_recipt_ACK){
-				console.error("send recipt_ACK");
+				if(DEBUG >= 2){
+					console.error("send recipt_ACK");
+				}
 				execute_command("B"+(next_TP20_seq).toString(16).toUpperCase(), function(moredata){
 					interpret_TP20_incoming(moredata, when_done, previus_data, ChunkMode);
 				});
 			}
 		}
 	}else{
-		console.error("incoming data is not KWP2000")
+		if(DEBUG >= 2){
+			console.error("incoming data is not KWP2000")
+		}
 		if(ChunkMode){
 			last_packet = true;
 		}
@@ -325,7 +357,6 @@ function SendTPData(data, callback){
 	});
 	TP_send_seq++;
 	if(TP_send_seq>15){
-		console.error("We should have requested an ACK")
 		TP_send_seq = 0;
 	}
 }
@@ -595,7 +626,9 @@ function setup_TP20_channel(dest, callback){
 	execute_command(hexstr(dest)+" "+TP20_opcodes.Setup_request+" 00 10 00 03 01", function(lines){
 		TP20response = TP20_line_cleanup(lines);
 		if(TP20response[0][1] == TP20_opcodes.Positive_response){
-			console.error("TP 2.0 protocol channel request was Approved")
+			if(DEBUG >= 2){
+				console.error("TP 2.0 protocol channel request was Approved")
+			}
 		
 			var VirtualCanAddress = (TP20response[0][5]+TP20response[0][4]).substr(1)
 
@@ -608,7 +641,9 @@ function setup_TP20_channel(dest, callback){
 			//Send own channel parameters, request others
 			execute_command(TP20_opcodes.Parameters_request+" 0F 8A FF 4A FF", function(lines){
 				TP20response = TP20_line_cleanup(lines);
-				console.error("TP 2.0 protocol channel parameters recived", TP20response)
+				if(DEBUG >= 2){
+					console.error("TP 2.0 protocol channel parameters recived", TP20response)
+				}
 				
 				callback()
 				
@@ -634,7 +669,9 @@ function ELM_conection_established(){
 	execute_command("AT H1");//Headers On
 	execute_command("AT ST 19");//Set Timeout to hh x 4 msec
 	execute_command("AT D1", function(){
-		console.error("initiation done");
+		if(DEBUG >= 1){
+			console.error("initiation done");
+		}
 		process.stdin.resume();
 		
 
@@ -651,16 +688,18 @@ function ELM_conection_established(){
 					})
 				}else{
 					request_DTC(function(){
-						//request_blocks();
+						request_blocks();
 						//process.exit(0)
 					});
 					//Some ECU's support requesting the id's some do not,  
 					
+/*
 					request_short_id(function(){
 						request_long_id(function(){
 							request_blocks();
 						})
 					})
+*/
 					
 				}
 			});
@@ -669,15 +708,16 @@ function ELM_conection_established(){
 	});//display of the DLC On (CAN) Show length of message
 }
 
-var messuring_blocks = ['01', '02', '03', '04'];
-//var messuring_blocks = ['02'];
+//var messuring_blocks = ['01', '02', '03', '04'];
+var messuring_blocks = ['02'];
 var block_ar_id = 0;
 
 //request messuring blocks over and over again
 function request_blocks(){
-	console.error("Requesting block ", messuring_blocks[block_ar_id]);
+	//console.error("Requesting block ", messuring_blocks[block_ar_id]);
 	request_block(messuring_blocks[block_ar_id], function(dat){
-		console.error("Got data from block ", messuring_blocks[block_ar_id], dat);
+		//console.error("Got data from block ", messuring_blocks[block_ar_id], dat);
+		console.error("block: ", dat[0], dat[1])
 		block_ar_id++;
 		if(typeof(messuring_blocks[block_ar_id]) == 'undefined'){
 			block_ar_id = 0;
@@ -705,7 +745,7 @@ function on_data_from_car(data, isNotification){
 				response_lines.push(response_lines_raw[x])
 			}
 		}
-		if(DEBUG){
+		if(DEBUG >= 5){
 			console.error("respose("+last_command.cmd+"):\n", response_lines);
 		}
 		reciving_response = "";
@@ -728,14 +768,17 @@ function send_data_to_car(data){
 
 //Executed when a low energy bluetoth device is found
 noble.on('discover', function(peripheral) {
-	//DEBUG
-	console.error('found peripheral');
+	if(DEBUG >= 1){
+		console.error('found peripheral');
+	}
 	peripheral.once('connect', function(){
-		//DEBUG
-		console.error('conected');
+		if(DEBUG >= 1){
+			console.error('conected');
+		}
 		process.on('exit', function (){
-			//DEBUG
-			console.error('disconecting');
+			if(DEBUG >= 1){
+				console.error('disconecting');
+			}
 			peripheral.disconnect();
 		});
 		peripheral.discoverServices(Service, function(error, services){
@@ -749,12 +792,14 @@ noble.on('discover', function(peripheral) {
 							characteristics[y].on('data', on_data_from_car);
 							characteristics[y].subscribe(error_function);
 							
-							//DEBUG
-							console.error('Subscribed to notifier');
+							if(DEBUG >= 1){
+								console.error('Subscribed to notifier');
+							}
 						}else{
 							Writer = characteristics[y];
-							//DEBUG
-							console.error('found Writer');
+							if(DEBUG >= 1){
+								console.error('found Writer');
+							}
 						}
 					}
 					setTimeout(ELM_conection_established, 500);
