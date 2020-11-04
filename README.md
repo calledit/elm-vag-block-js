@@ -24,6 +24,9 @@ node elm-vag-block.js 1 scan_identification
 #scans all the messuring blocks the ECU on address 1 provides
 node elm-vag-block.js 1 scan_blocks
 
+#reads messuring blocks 1 2 4 & 80 from an ecu
+node elm-vag-block.js 1 read_blocks 1 2 4 80
+
 #Scans the DTC codes of the ECU on adress 1 
 node elm-vag-block.js 1 scan_DTC
 
@@ -32,11 +35,8 @@ node elm-vag-block.js 1 reset_DTC
 
 ```
 
-Will try to connect to your carista ELM327 low energy Bluetooth adapter and read out the DTC faults, show some data from the messuring blocks.
-To get a list of all the ECU's in the car: connect to the diagnostics ECU on address 31. Or you can try to reach the engine ECU, it is always on address 1.
-``` bash
-node elm-vag-block.js 31
-```
+It trys to connect to your carista ELM327 low energy Bluetooth adapter. And talk TP2.0 to the cars ecus.
+
 
 ## Install
 ``` bash
