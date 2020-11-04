@@ -519,7 +519,29 @@ function decode_data_val(ecu, block, val_id, data_type, b1, b2){
 	return str;
 
 }
+function all_common_block(){
 
+	for(high_byte=0;high_byte<255;high_byte++){
+		for(low_byte=0;low_byte<255;low_byte++){
+			request_common_block(hexstr(high_byte), hexstr(low_byte), function(){});
+		}
+	}
+	
+}
+
+function request_common_block(high_byte, low_byte, callback){
+	ExecuteKWP(['22', high_byte, low_byte], function(data){
+		//console.error("block data", data)
+		var values = []
+
+		response_code = data.shift();//61 means block data, 7F is called negative by other librarys, there are other codes
+		if(response_code != '7F'){
+			console.error("common_block:", high_byte, low_byte, data)
+		}
+
+		callback(values);
+	});
+}
 
 //Requests data block from ECU A data block is a block of max 4 data values
 //that has data about some messurment from the ECU
@@ -823,6 +845,8 @@ function ELM_conection_established(){
 					});
 				}else if(action == 'scan_DTC'){
 					request_DTC(function(){});
+				}else if(action == 'scan_common_blocks'){
+					all_common_block();
 				}else if(action == 'reset_DTC'){
 					reset_DTC(function(){});
 				}else if(action == 'dump_memory'){
