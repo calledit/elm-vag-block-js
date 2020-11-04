@@ -33,8 +33,10 @@ var Command =  args[1];
 var TestHex =  args[1];
 
 var action = 'default';
+var sub_commands;
 if(Command){
 	action = Command;
+	sub_commands = process.argv.slice(4)
 }
 //catch ctrl-c so we can disconect from bluetoth
 process.on('SIGINT', function() {
@@ -362,7 +364,50 @@ TP_send_seq = 0;
 //message
 function SendTPData(data, callback){
 	KWP2000_timeout = setTimeout(KWP_response_timeout, 1500);//if we dont get a response after 1.5s something is wrong
-	SendTP("1"+TP_send_seq.toString(16).toUpperCase()+" 00 "+hexstr(data.length)+" "+data.join(" "), function(data){
+
+	len_to_send = data.length
+	if(data.length > 5){
+		console.error("message to long long form tp2.0 implemented")
+		data_parts = [];
+		part = [];
+		while(data.length != 0){
+			byt = data.shift();
+			part.push(byt)
+			if(data_parts.length == 0){
+				if(part.length == 5){
+					data_parts.push(part);
+					part = [];
+				}
+			}else{
+				if(part.length == 7){
+					data_parts.push(part);
+					part = [];
+				}
+			}
+		}
+		data = data_parts[0];
+		first_to_send = data_parts.shift();
+		SendTP("2"+TP_send_seq.toString(16).toUpperCase()+" 00 "+hexstr(len_to_send)+" "+first_to_send.join(" "), function(data){});
+		TP_send_seq++;
+		if(TP_send_seq>15){
+			TP_send_seq = 0;
+		}
+		fincal_tosend = data_parts.pop();
+		for(y in data_parts){
+			SendTP("2"+TP_send_seq.toString(16).toUpperCase()+" "+data_parts[y].join(" "), function(data){});
+			TP_send_seq++;
+			if(TP_send_seq>15){
+				TP_send_seq = 0;
+			}
+		}
+		fincal_tosend = "1"+TP_send_seq.toString(16).toUpperCase()+" "+fincal_tosend.join(" ")
+		
+	}else{
+		fincal_tosend = "1"+TP_send_seq.toString(16).toUpperCase()+" 00 "+hexstr(len_to_send)+" "+data.join(" ");
+	}
+	
+	
+	SendTP(fincal_tosend, function(data){
 		respose_code = data[0];
 		if(respose_code == '7F'){
 			error_description_code = data[2];
@@ -525,22 +570,6 @@ function request_diag(callback){
 	}, true);
 }
 
-//clearDiagnosticInformation from the ECU
-function request_clearDiagnosticInformation(callback){
-	ExecuteKWP(['14'], function(data){//readDiagnosticTroubleCodesByStatus requestAllDTCAndStatus=03
-		response_code = data.shift();//54 means clearDiagnosticInformation, 7F is called negative by other librarys, there are other codes
-		identificationOption = data.shift();
-		
-		str = ""
-		for(x in data){
-			str += String.fromCharCode(parseInt(data[x], 16));
-		}
-
-		console.error("KWP200 clearDiagnosticInformation recived",response_code,  data, str);
-		callback(data);
-	});
-}
-
 //Clears DTC codes
 function reset_DTC(callback){
 	//clear DTC FF00 means all codes
@@ -617,6 +646,44 @@ function request_long_id(callback){
 	});
 }
 
+//funciton used for reading memmory
+function request_defined_memory(callback){
+	
+	byteAddress = 128;
+	mh = ((byteAddress >> 16) & 0xFF);//high
+	mm = ((byteAddress >> 8) & 0xFF);//midle
+	ml = ((byteAddress) & 0xFF);//low
+	ExecuteKWP(['2C', 'F1',
+		'03', '01', '02', hexstr(mh), hexstr(mm), hexstr(ml),
+		'03', '02', '02', hexstr(mh), hexstr(mm), hexstr(ml),
+		'03', '03', '02', hexstr(mh), hexstr(mm), hexstr(ml),
+		'03', '04', '02', hexstr(mh), hexstr(mm), hexstr(ml),
+		], function(data){
+			request_block('F1', function(data){
+				console.error('block DD', data)
+			});
+	});
+}
+
+//funciton used for reading memmory
+function request_memory(callback){
+	mh = 0x00;//high
+	mm = 0x00;//midle
+	ml = 0x00;//low
+	ExecuteKWP(['23', hexstr(mh), hexstr(mm), hexstr(ml), '80'], function(data){
+
+		response_code = data.shift();//5A means EcuIdentification, 7F is called negative by other librarys, there are other codes
+		identificationOption = data.shift();
+
+		str = ""
+		for(x in data){
+			str += String.fromCharCode(parseInt(data[x], 16));
+		}
+
+		console.error("KWP200 request_memory", response_code, identificationOption, data, str);
+		callback(data);
+	});
+}
 //funciton used for debuging
 function request_test_send(byteh, callback){
 	ExecuteKWP(['1A', byteh], function(data){
@@ -745,7 +812,7 @@ function ELM_conection_established(){
 			if(ECU_module == 31){
 				request_module_list(function(){
 					request_long_id(function(){
-						request_blocks();
+						//request_blocks();
 					})
 				})
 			}else{
@@ -758,6 +825,17 @@ function ELM_conection_established(){
 					request_DTC(function(){});
 				}else if(action == 'reset_DTC'){
 					reset_DTC(function(){});
+				}else if(action == 'dump_memory'){
+					//WIP
+					request_defined_memory(function(){});
+					//request_memory(function(){});
+				}else if(action == 'read_blocks'){
+					//setup all 255 messuring blocks to scan
+					messuring_blocks = []
+					for(i in sub_commands){
+						messuring_blocks.push(hexstr(i))
+					}
+					request_blocks();
 				}else if(action == 'scan_blocks'){
 
 					//setup all 255 messuring blocks to scan
