@@ -833,7 +833,7 @@ function ELM_conection_established(){
 					//setup all 255 messuring blocks to scan
 					messuring_blocks = []
 					for(i in sub_commands){
-						messuring_blocks.push(hexstr(i))
+						messuring_blocks.push(hexstr(parseInt(sub_commands[i])))
 					}
 					request_blocks();
 				}else if(action == 'scan_blocks'){
