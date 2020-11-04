@@ -25,7 +25,7 @@ node elm-vag-block.js 1 scan_identification
 node elm-vag-block.js 1 scan_blocks
 
 #Scans the DTC codes of the ECU on adress 1 
-node elm-vag-block.js 1 scan_blocks
+node elm-vag-block.js 1 scan_DTC
 
 #resets the DTC codes of the ECU on adress 1 
 node elm-vag-block.js 1 reset_DTC
