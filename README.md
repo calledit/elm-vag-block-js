@@ -12,7 +12,24 @@ To read car data from the browser using a Bluetoth low energy adapter and the We
 ## Usage
 
 ``` bash
-node elm-vag-block.js ${address_of_ECU}
+
+#node elm-vag-block.js ${address_of_ECU} ${command}
+
+#retrive list of addresses to all the cars ECU's
+node elm-vag-block.js 31 #The ecu on address 31 contains a list of all other ECU's
+
+#scans all the identifications the ECU  on address 1 provides
+node elm-vag-block.js 1 scan_identification 
+
+#scans all the messuring blocks the ECU on address 1 provides
+node elm-vag-block.js 1 scan_blocks
+
+#Scans the DTC codes of the ECU on adress 1 
+node elm-vag-block.js 1 scan_blocks
+
+#resets the DTC codes of the ECU on adress 1 
+node elm-vag-block.js 1 reset_DTC
+
 ```
 
 Will try to connect to your carista ELM327 low energy Bluetooth adapter and read out the DTC faults, show some data from the messuring blocks.
