@@ -29,7 +29,13 @@ var DEBUG=0
 const args = process.argv.slice(2)
 var ECU_module = parseInt(args[0]);
 
-var TestHex =  args[1]
+var Command =  args[1];
+var TestHex =  args[1];
+
+var action = 'default';
+if(Command){
+	action = Command;
+}
 //catch ctrl-c so we can disconect from bluetoth
 process.on('SIGINT', function() {
 	process.exit();
@@ -306,11 +312,34 @@ function is_TP20(lines){
 }
 
 
-function ExecuteKWP(cmd_data, callback){
-	KWP200_command_que.push({cmd:cmd_data, callback:callback})
+function ExecuteKWP(cmd_data, callback, force_first){
+	if(typeof(force_first) != 'undefined' && force_first){
+		KWP200_command_que.unshift({cmd:cmd_data, callback:callback})
+	}else{
+		KWP200_command_que.push({cmd:cmd_data, callback:callback})
+	}
 	try_send_command_from_KWP2000_que()
 }
 
+function KWP_response_timeout(){
+	console.error("no response after 1.5s, something is wrong should we send a Break opcode? should probably be done with execute_command from inside SendTP like when we send ACk")
+				
+	wating_for_kwp2000_response = false;//Giveup no response is comming
+
+
+	//Should we try to kill the connection by sending a A8 to? is
+	//it required
+	
+	failed_kwp_command = last_KWP2000_command;//save the failed command
+
+	//initiate a new session with the ECU
+	initate_kwpsession(null,function(){
+		ExecuteKWP(failed_kwp_command.cmd, failed_kwp_command.callback, true);//reexecute the failed command
+	})
+
+}
+
+var KWP2000_timeout;
 function try_send_command_from_KWP2000_que(){
 	if(!wating_for_kwp2000_response && KWP200_command_que.length != 0){
 		last_KWP2000_command = KWP200_command_que.shift();
@@ -332,6 +361,7 @@ TP_send_seq = 0;
 //not implmented longer TP 2.0 messages that would require more than one canbus
 //message
 function SendTPData(data, callback){
+	KWP2000_timeout = setTimeout(KWP_response_timeout, 1500);//if we dont get a response after 1.5s something is wrong
 	SendTP("1"+TP_send_seq.toString(16).toUpperCase()+" 00 "+hexstr(data.length)+" "+data.join(" "), function(data){
 		respose_code = data[0];
 		if(respose_code == '7F'){
@@ -351,6 +381,7 @@ function SendTPData(data, callback){
 			}
 		}
 
+		clearTimeout(KWP2000_timeout);
 		callback(data)
 		wating_for_kwp2000_response = false;
 		try_send_command_from_KWP2000_que();
@@ -456,15 +487,26 @@ function request_block(block, callback){
 		if(response_code != '7F'){
 
 			block_id = data.shift()
-			
-			val_id = 0;
-			while(data.length != 0){
-				data_type = parseInt(data.shift(), 16)
-				b1 = data.shift()
-				b2 = data.shift()
+			if(block_id == '50' || block_id == '51' || block_id == '52'){
+				//50 contains Identification
+				//51 contains vin on engine ecu
+				str = ""
+				for(x in data){
+					str += String.fromCharCode(parseInt(data[x], 16));
+				}
+				values.push(str);
 				
-				values.push(decode_data_val("not used", block_id, val_id, data_type, b1, b2));
-				val_id++;
+			}else{
+				
+				val_id = 0;
+				while(data.length != 0){
+					data_type = parseInt(data.shift(), 16)
+					b1 = data.shift()
+					b2 = data.shift()
+					
+					values.push(decode_data_val("not used", block_id, val_id, data_type, b1, b2));
+					val_id++;
+				}
 			}
 		}
 
@@ -480,7 +522,7 @@ function request_diag(callback){
 
 		console.error("KWP2000 Diag recived", data);
 		callback();
-	});
+	}, true);
 }
 
 //clearDiagnosticInformation from the ECU
@@ -536,6 +578,8 @@ function request_DTC(callback){
 	});
 }
 
+//"1A 90" is vin but it really depends on the ECU what the ReadEcuIdentification
+//services return
 //requests a short id from the ECU some modules dont have a short id
 function request_short_id(callback){
 	ExecuteKWP(['1A', '91'], function(data){//ReadEcuIdentification identificationOption=91
@@ -574,8 +618,8 @@ function request_long_id(callback){
 }
 
 //funciton used for debuging
-function request_test_send(callback){
-	ExecuteKWP(['1A', TestHex], function(data){
+function request_test_send(byteh, callback){
+	ExecuteKWP(['1A', byteh], function(data){
 
 		response_code = data.shift();//5A means EcuIdentification, 7F is called negative by other librarys, there are other codes
 		identificationOption = data.shift();
@@ -585,7 +629,7 @@ function request_test_send(callback){
 			str += String.fromCharCode(parseInt(data[x], 16));
 		}
 
-		console.error("KWP200 test funciton recived", data, str);
+		console.error("KWP200 test funciton recived", byteh,  response_code, identificationOption, data, str);
 		callback(data);
 	});
 }
@@ -613,8 +657,26 @@ function request_module_list(callback){
 	});
 }
 
+var active_kwp_session_dest_ecu;
+function initate_kwpsession(dest, callback){
+	if(typeof(dest) != 'undefined' && dest != null){
+		active_kwp_session_dest_ecu = dest;
+	}
+	wating_for_kwp2000_response = false;
+	SendTP(TP20_opcodes.Disconnect, function(moredata){
+		if(DEBUG >= 2){
+			console.error("sent ack for disconect", moredata)
+		}
+	});
+	setup_TP20_channel(active_kwp_session_dest_ecu, callback)
+}
+
 //Sets up a TP 2.0 DATA chanel to a specifed ECU
 function setup_TP20_channel(dest, callback){
+
+
+	TP_send_seq = 0;
+	next_TP20_seq = 0;
 
 	//Set Header (OBD, and CAN)(sent from address)
 	execute_command("AT SH 200");
@@ -645,8 +707,9 @@ function setup_TP20_channel(dest, callback){
 					console.error("TP 2.0 protocol channel parameters recived", TP20response)
 				}
 				
-				callback()
-				
+				request_diag(function(){
+					callback()
+				});
 			});
 			
 		}else{
@@ -678,31 +741,51 @@ function ELM_conection_established(){
 		//setup_TP20_channel(0x1f);//Diagnostic Interface 31
 		//setup_TP20_channel(0x01);//engine
 		//setup_TP20_channel(10);//awd
-		setup_TP20_channel(ECU_module, function(){
-			request_diag(function(){
-				if(ECU_module == 31){
-					request_module_list(function(){
-						request_long_id(function(){
-							request_blocks();
-						})
-					})
-				}else{
-					request_DTC(function(){
+		initate_kwpsession(ECU_module, function(){
+			if(ECU_module == 31){
+				request_module_list(function(){
+					request_long_id(function(){
 						request_blocks();
+					})
+				})
+			}else{
+				if(action == 'default'){
+					request_DTC(function(){
+						//request_blocks();
 						//process.exit(0)
 					});
-					//Some ECU's support requesting the id's some do not,  
+				}else if(action == 'scan_DTC'){
+					request_DTC(function(){});
+				}else if(action == 'reset_DTC'){
+					reset_DTC(function(){});
+				}else if(action == 'scan_blocks'){
+
+					//setup all 255 messuring blocks to scan
+					messuring_blocks = []
+					for(i=0x01;i<255;i++){
+						messuring_blocks.push(hexstr(i))
+					}
+					//scan all 255
+					request_blocks();
 					
-/*
-					request_short_id(function(){
-						request_long_id(function(){
-							request_blocks();
-						})
-					})
-*/
+					
+				}else if(action == 'scan_identification'){
+					for(i=0x00;i<255;i++){
+						request_test_send(hexstr(i), function(d){})
+					}
 					
 				}
-			});
+				//Some ECU's support requesting the id's some do not,  
+				
+/*
+				request_short_id(function(){
+					request_long_id(function(){
+						request_blocks();
+					})
+				})
+*/
+				
+			}
 		});
 		
 	});//display of the DLC On (CAN) Show length of message
@@ -715,9 +798,10 @@ var block_ar_id = 0;
 //request messuring blocks over and over again
 function request_blocks(){
 	//console.error("Requesting block ", messuring_blocks[block_ar_id]);
+	var Which_block = block_ar_id;
 	request_block(messuring_blocks[block_ar_id], function(dat){
 		//console.error("Got data from block ", messuring_blocks[block_ar_id], dat);
-		console.error("block: ", dat[0], dat[1])
+		console.error("block: ", messuring_blocks[Which_block], dat)
 		block_ar_id++;
 		if(typeof(messuring_blocks[block_ar_id]) == 'undefined'){
 			block_ar_id = 0;
